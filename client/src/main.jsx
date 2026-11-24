@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { io } from 'socket.io-client';
 import { QRCodeSVG } from 'qrcode.react';
-import { api } from './api';
+import { Hotel as HotelIcon, ClipboardList, DoorOpen, UsersRound, ScrollText, LogOut, ArrowRight, ArrowUpRight, BedDouble, CalendarDays, KeyRound, Mail, Smartphone, CircleHelp, CheckCircle2, PackageSearch, Star } from 'lucide-react';
+import { api, apiBaseUrlForSocket } from './api';
 import './style.css';
 
 const departments = ['Housekeeping', 'Room Service', 'Maintenance', 'Guest Services', 'General'];
@@ -21,12 +22,13 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [staff, setStaff] = useState([]);
   const [rooms, setRooms] = useState([]);
+  const [lostFound, setLostFound] = useState([]);
   const [metrics, setMetrics] = useState({ open: 0, overdue: 0, completedToday: 0, availableRooms: 0 });
   const [statusFilter, setStatusFilter] = useState('All requests');
   const [search, setSearch] = useState('');
   const [signup, setSignup] = useState(false);
   const [booking, setBooking] = useState(false);
-  const [qrToken, setQrToken] = useState('');
+  const [resetToken, setResetToken] = useState('');
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -37,12 +39,14 @@ function App() {
     if (!session) return;
     try {
       if (session.user.role === 'guest') {
-        const data = await api('/guest/requests');
+        const [data, lostData] = await Promise.all([api('/guest/requests'), api('/guest/lost-found')]);
         setRequests(data.requests);
+        setLostFound(lostData.reports);
       } else {
-        const data = await api('/staff/requests');
+        const [data, lostData] = await Promise.all([api('/staff/requests'), api('/staff/lost-found')]);
         setRequests(data.requests);
-        const roomData = await api('/staff/rooms');
+        setLostFound(lostData.reports);
+        const roomData = await api(session.user.role === 'admin' ? '/admin/rooms' : '/staff/rooms');
         setRooms(roomData.rooms);
         if (session.user.role === 'admin') {
           const [summary, logData, staffData] = await Promise.all([api('/admin/summary'), api('/admin/logs'), api('/admin/staff')]);
@@ -60,14 +64,18 @@ function App() {
     async function boot() {
       const url = new URL(window.location.href);
       const token = url.searchParams.get('token');
-      if (window.location.pathname === '/guest/activate' && token) {
+      if (window.location.pathname === '/reset-password' && token) {
+        if (mounted) { setResetToken(token); window.history.replaceState({}, '', '/reset-password'); }
+      } else if (window.location.pathname === '/guest/activate' && token) {
         try {
           const data = await api('/auth/guest-session', { method: 'POST', body: JSON.stringify({ token }) });
           window.history.replaceState({}, '', '/');
           if (mounted) { setSession(data); notify(`Welcome to ${data.hotel.name}`); }
         } catch (err) { if (mounted) { setError(err.message); window.history.replaceState({}, '', '/'); } }
       } else {
-        try { const data = await api('/auth/me'); if (mounted) setSession(data); } catch { /* Signed out is the normal first-run state. */ }
+        try { const data = await api('/auth/me'); if (mounted) setSession(data); } catch (err) {
+          if (mounted && err.status !== 401) setError(err.message);
+        }
       }
       if (mounted) setLoading(false);
     }
@@ -78,10 +86,11 @@ function App() {
   useEffect(() => { if (session) refresh(); }, [session, refresh]);
   useEffect(() => {
     if (!session) return undefined;
-    const socket = io({ withCredentials: true });
+    const socket = io(apiBaseUrlForSocket, { withCredentials: true });
     socket.on('request:new', refresh);
     socket.on('request:updated', refresh);
     socket.on('room:updated', refresh);
+    socket.on('lost-found:updated', refresh);
     socket.on('stay:ended', () => { setSession(null); setError('Your stay has ended. Contact the front desk if you need help.'); });
     return () => socket.disconnect();
   }, [session, refresh]);
@@ -107,22 +116,23 @@ function App() {
     return matchesStatus && matchesSearch;
   }), [requests, statusFilter, search]);
 
-  if (loading) return <main className="boot"><span className="brand-mark">S</span><p>Opening StayFlow…</p></main>;
+  if (loading) return <main className="boot"><span className="brand-mark"><HotelIcon size={17} strokeWidth={1.8} /></span><p>Opening StayFlow…</p></main>;
+  if (resetToken) return <ResetPassword token={resetToken} onDone={() => { setResetToken(''); window.history.replaceState({}, '', '/'); }} />;
   if (!session && booking) return <GuestBooking onBack={() => setBooking(false)} />;
   if (!session) return <AuthScreen signup={signup} setSignup={setSignup} error={error} onSubmit={submitAuth} onReserve={() => setBooking(true)} />;
-  if (session.user.role === 'guest') return <GuestPortal session={session} requests={requests} refresh={refresh} notify={notify} error={error} logout={logout} toast={toast} />;
+  if (session.user.role === 'guest') return <GuestPortal session={session} requests={requests} lostFound={lostFound} refresh={refresh} notify={notify} error={error} logout={logout} toast={toast} />;
 
   const isAdmin = session.user.role === 'admin';
-  const tabs = [{ id: 'requests', label: 'Requests', count: requests.filter(r => !['Closed', 'Completed'].includes(r.status)).length }, { id: 'frontdesk', label: 'Front desk' }, ...(isAdmin ? [{ id: 'team', label: 'Team' }, { id: 'activity', label: 'Activity log' }] : [])];
+  const tabs = [{ id: 'requests', label: 'Requests', icon: ClipboardList, count: requests.filter(r => !['Closed', 'Completed'].includes(r.status)).length }, { id: 'frontdesk', label: 'Front desk', icon: DoorOpen }, { id: 'lostfound', label: 'Lost & Found', icon: PackageSearch, count: lostFound.filter(r => !['Returned', 'Closed'].includes(r.status)).length }, ...(isAdmin ? [{ id: 'rooms', label: 'Rooms', icon: BedDouble }, { id: 'team', label: 'Team', icon: UsersRound }, { id: 'activity', label: 'Activity log', icon: ScrollText }] : [])];
   return <div className="workspace">
     <aside className="rail">
-      <div className="brand"><span className="brand-mark">S</span><span>StayFlow</span></div>
+      <div className="brand"><span className="brand-mark"><HotelIcon size={17} strokeWidth={1.8} /></span><span>StayFlow</span></div>
       <div className="workspace-name"><span className="hotel-dot" />{session.hotel?.name || 'Hotel workspace'}</div>
       <nav aria-label="Main navigation">
         <p className="nav-label">Workspace</p>
-        {tabs.map(tab => <button key={tab.id} className={`nav-item ${view === tab.id ? 'active' : ''}`} onClick={() => setView(tab.id)}><span>{tab.label}</span>{tab.count > 0 && <span className="nav-count">{tab.count}</span>}</button>)}
+        {tabs.map(tab => <button key={tab.id} className={`nav-item ${view === tab.id ? 'active' : ''}`} onClick={() => setView(tab.id)}><span className="nav-name"><tab.icon size={16} strokeWidth={1.8} />{tab.label}</span>{tab.count > 0 && <span className="nav-count">{tab.count}</span>}</button>)}
       </nav>
-      <div className="rail-bottom"><div className="signed-in"><span className="avatar">{session.user.name.slice(0, 1).toUpperCase()}</span><span><strong>{session.user.name}</strong><small>{isAdmin ? 'Hotel administrator' : session.user.department}</small></span></div><button className="text-button signout" onClick={logout}>Sign out</button></div>
+      <div className="rail-bottom"><div className="signed-in"><span className="avatar">{session.user.name.slice(0, 1).toUpperCase()}</span><span><strong>{session.user.name}</strong><small>{isAdmin ? 'Hotel administrator' : session.user.department}</small></span></div><button className="text-button signout" onClick={logout}><LogOut size={14} />Sign out</button></div>
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="crumb">{isAdmin ? 'Hotel operations' : session.user.department}<span>/</span><b>{tabs.find(tab => tab.id === view)?.label}</b></div><div className="top-actions"><span className="live-dot" />Live updates <button className="avatar small" aria-label="Account">{session.user.name.slice(0, 1).toUpperCase()}</button></div></header>
@@ -137,7 +147,9 @@ function App() {
             <div className="request-list">{filteredRequests.length ? filteredRequests.map(item => <RequestRow key={item.id} item={item} staff={staff} isAdmin={isAdmin} refresh={refresh} notify={notify} />) : <div className="empty-state"><div className="empty-mark">✓</div><strong>No requests in this view</strong><p>New room requests will appear here as soon as a guest sends one.</p></div>}</div>
           </section>
         </>}
-        {view === 'frontdesk' && <FrontDesk rooms={rooms} refresh={refresh} notify={notify} isAdmin={isAdmin} canManageRooms={isAdmin || session.user.department === 'Housekeeping'} />}
+        {view === 'frontdesk' && <FrontDesk rooms={rooms} refresh={refresh} notify={notify} canManageRooms={isAdmin || session.user.department === 'Housekeeping'} />}
+        {view === 'lostfound' && <LostFoundDesk reports={lostFound} refresh={refresh} notify={notify} />}
+        {view === 'rooms' && isAdmin && <RoomManagement rooms={rooms} refresh={refresh} notify={notify} />}
         {view === 'team' && isAdmin && <Team staff={staff} refresh={refresh} notify={notify} />}
         {view === 'activity' && isAdmin && <Activity logs={logs} />}
       </div>
@@ -174,11 +186,11 @@ function GuestBooking({ onBack }) {
     try { setResult(await api('/public/reservations', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) })); target.reset(); }
     catch (err) { setError(err.message); }
   }
-  return <main className="booking-shell"><header className="guest-header"><div className="brand"><span className="brand-mark">S</span><span>StayFlow</span></div><button className="text-button" onClick={onBack}>Back to staff sign in</button></header><div className="booking-content"><p className="eyebrow">PLAN YOUR STAY</p><h1>Find a room.<br />Know who to call.</h1><p className="booking-intro">Choose a hotel and dates. Your confirmation code will activate a private room service QR when you check in.</p>
+  return <main className="booking-shell"><header className="guest-header"><div className="brand"><span className="brand-mark"><HotelIcon size={17} strokeWidth={1.8} /></span><span>StayFlow</span></div><button className="text-button" onClick={onBack}>Back to staff sign in</button></header><div className="booking-content"><p className="eyebrow">PLAN YOUR STAY</p><h1>Find a room.<br />Know who to call.</h1><p className="booking-intro">Choose a hotel and dates. Your confirmation code will activate a private room service QR when you check in.</p>
     {result ? <section className="booking-confirmation"><span className="confirmation-check">✓</span><h2>Your room is reserved</h2><p>{result.reservation.hotel} · Room {result.reservation.roomNumber}</p><p>{new Date(result.reservation.checkIn).toLocaleDateString()} to {new Date(result.reservation.checkOut).toLocaleDateString()}</p><div className="confirmation-code"><span>Show this code at the front desk</span><strong>{result.confirmationCode}</strong></div><button className="secondary" onClick={() => { setResult(null); onBack(); }}>Done</button></section> : <form className="booking-form" onSubmit={reserve}>
       <label className="field"><span>Hotel</span><select name="hotelSlug" value={hotelSlug} onChange={e => setHotelSlug(e.target.value)} required><option value="">Choose a hotel</option>{hotels.map(hotel => <option key={hotel.slug} value={hotel.slug}>{hotel.name}</option>)}</select></label>
       <div className="booking-dates"><label className="field"><span>Check in</span><input type="date" name="checkIn" value={checkIn} min={today} onChange={e => setCheckIn(e.target.value)} required /></label><label className="field"><span>Check out</span><input type="date" name="checkOut" value={checkOut} min={checkIn || today} onChange={e => setCheckOut(e.target.value)} required /></label></div>
-      <label className="field"><span>Available room</span><select name="roomNumber" value={roomNumber} onChange={e => setRoomNumber(e.target.value)} required><option value="">{hotelSlug ? (rooms.length ? 'Choose a room' : 'No rooms available for those dates') : 'Choose a hotel first'}</option>{rooms.map(room => <option key={room.roomNumber} value={room.roomNumber}>Room {room.roomNumber}</option>)}</select></label>
+      <label className="field"><span className="field-icon"><BedDouble size={14} />Available room</span><select name="roomNumber" value={roomNumber} onChange={e => setRoomNumber(e.target.value)} required><option value="">{hotelSlug ? (rooms.length ? 'Choose a room' : 'No rooms available for those dates') : 'Choose a hotel first'}</option>{rooms.map(room => <option key={room.roomNumber} value={room.roomNumber}>Room {room.roomNumber} · {room.roomType || 'Standard'}</option>)}</select></label>
       <Field label="Guest name" name="guestName" placeholder="Name for the reservation" required maxLength={80} />
       <Field label="Email for your reservation" name="guestEmail" type="email" placeholder="you@example.com" required maxLength={254} />
       {error && <div className="inline-error" role="alert">{error}</div>}
@@ -189,9 +201,10 @@ function GuestBooking({ onBack }) {
 }
 
 function AuthScreen({ signup, setSignup, error, onSubmit, onReserve }) {
+  const [forgot, setForgot] = useState(false);
   return <main className="auth-shell">
-    <section className="auth-story"><div className="brand brand-light"><span className="brand-mark">S</span><span>StayFlow</span></div><div className="story-copy"><p className="eyebrow">HOTEL SERVICE, IN SYNC</p><h1>Every request<br />has a way forward.</h1><p>One clear queue for room issues, staff handoffs, and guest updates.</p></div><div className="story-foot"><span className="live-dot" />Service desk ready for the next guest</div></section>
-    <section className="auth-form-area"><form className="auth-form" onSubmit={onSubmit}>
+    <section className="auth-story"><div className="brand brand-light"><span className="brand-mark"><HotelIcon size={17} strokeWidth={1.8} /></span><span>StayFlow</span></div><div className="story-copy"><p className="eyebrow">HOTEL SERVICE, IN SYNC</p><h1>Every request<br />has a way forward.</h1><p>One clear queue for room issues, staff handoffs, and guest updates.</p></div><div className="story-foot"><span className="live-dot" />Service desk ready for the next guest</div></section>
+    <section className="auth-form-area">{forgot ? <ForgotPasswordForm onBack={() => setForgot(false)} /> : <form className="auth-form" onSubmit={onSubmit}>
       <div><h2>{signup ? 'Create a hotel workspace' : 'Sign in to StayFlow'}</h2><p>{signup ? 'Set up the hotel and administrator account.' : 'Use your hotel workspace and staff account.'}</p></div>
       {signup ? <>
         <Field label="Hotel name" name="hotelName" placeholder="e.g. The Harbor House" required maxLength={100} />
@@ -199,14 +212,51 @@ function AuthScreen({ signup, setSignup, error, onSubmit, onReserve }) {
         <Field label="Your name" name="name" placeholder="Name" required maxLength={80} />
       </> : <Field label="Hotel workspace" name="hotelSlug" placeholder="hotel-name" required maxLength={48} />}
       <Field label="Email" name="email" type="email" placeholder="you@hotel.com" required maxLength={254} />
+      {signup && <Field label="Phone for SMS recovery (optional)" name="phone" type="tel" placeholder="+639171234567" pattern="\+[1-9]\d{7,14}" maxLength={16} hint="Use international format, such as +63917…" />}
       <Field label="Password" name="password" type="password" placeholder="At least 12 characters" required minLength={12} maxLength={128} />
       {signup && <p className="field-hint">Use upper and lower case, a number, and a symbol.</p>}
+      {!signup && <button type="button" className="forgot-link" onClick={() => setForgot(true)}><CircleHelp size={14} />Forgot password?</button>}
       {error && <div className="inline-error" role="alert">{error}</div>}
-      <button className="primary auth-submit" type="submit">{signup ? 'Create workspace' : 'Sign in'} <span>→</span></button>
+      <button className="primary auth-submit" type="submit">{signup ? 'Create workspace' : 'Sign in'} <ArrowRight size={16} /></button>
       <p className="auth-switch">{signup ? 'Already have a workspace?' : 'Setting up a new hotel?'} <button type="button" onClick={() => setSignup(!signup)}>{signup ? 'Sign in' : 'Create one'}</button></p>
       <button type="button" className="reserve-link" onClick={onReserve}>Looking for a room? Browse hotels and reserve</button><p className="privacy-note">Secure staff access · Guest service opens from a verified stay</p>
-    </form></section>
+    </form>}</section>
   </main>;
+}
+
+function ForgotPasswordForm({ onBack }) {
+  const [method, setMethod] = useState('email');
+  const [error, setError] = useState('');
+  const [sent, setSent] = useState(false);
+  async function submit(event) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); setError('');
+    try { await api('/auth/forgot-password', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) }); setSent(true); }
+    catch (err) { setError(err.message); }
+  }
+  return sent ? <div className="auth-form recovery-card"><span className="recovery-icon"><Mail size={19} /></span><h2>Check your messages</h2><p>If an active account matches those details, a one-time reset link will arrive shortly. The link expires in 15 minutes.</p><button className="secondary" onClick={onBack}>Back to sign in</button></div> : <form className="auth-form" onSubmit={submit}>
+    <button type="button" className="back-link" onClick={onBack}><ArrowUpRight size={14} />Back to sign in</button>
+    <div><h2>Reset your password</h2><p>We’ll send a one-time link to the email or phone on your staff account.</p></div>
+    <Field label="Hotel workspace" name="hotelSlug" placeholder="hotel-name" required maxLength={48} />
+    <label className="field"><span>Send reset link by</span><select name="method" value={method} onChange={e => setMethod(e.target.value)}><option value="email">Email</option><option value="sms">Text message</option></select></label>
+    <Field label={method === 'email' ? 'Account email' : 'Account phone'} name="contact" type={method === 'email' ? 'email' : 'tel'} placeholder={method === 'email' ? 'you@hotel.com' : '+639171234567'} pattern={method === 'sms' ? '\+[1-9]\d{7,14}' : undefined} maxLength={method === 'email' ? 254 : 16} required />
+    {error && <div className="inline-error" role="alert">{error}</div>}
+    <button className="primary auth-submit" type="submit">Send reset link {method === 'email' ? <Mail size={15} /> : <Smartphone size={15} />}</button>
+    <p className="privacy-note">Reset links are single-use and expire in 15 minutes.</p>
+  </form>;
+}
+
+function ResetPassword({ token, onDone }) {
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function submit(event) {
+    event.preventDefault(); const form = new FormData(event.currentTarget); const password = form.get('password');
+    if (password !== form.get('confirmPassword')) { setError('The passwords do not match.'); return; }
+    setError(''); setBusy(true);
+    try { await api('/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) }); onDone(); }
+    catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+  return <main className="auth-shell"><section className="auth-story"><div className="brand brand-light"><span className="brand-mark"><HotelIcon size={17} /></span><span>StayFlow</span></div><div className="story-copy"><p className="eyebrow">ACCOUNT SECURITY</p><h1>A fresh key<br />for your account.</h1><p>Choose a new password to secure your hotel workspace.</p></div><div className="story-foot"><span className="live-dot" />One-time reset link</div></section><section className="auth-form-area"><form className="auth-form" onSubmit={submit}><div><h2>Choose a new password</h2><p>Use 12 or more characters with upper and lower case, a number, and a symbol.</p></div><Field label="New password" name="password" type="password" minLength={12} maxLength={128} required /><Field label="Confirm new password" name="confirmPassword" type="password" minLength={12} maxLength={128} required />{error && <div className="inline-error" role="alert">{error}</div>}<button className="primary auth-submit" disabled={busy} type="submit">Update password <KeyRound size={15} /></button></form></section></main>;
 }
 
 function Field({ label, name, hint, ...props }) {
@@ -254,7 +304,7 @@ function RequestRow({ item, staff, isAdmin, refresh, notify }) {
 }
 function Status({ status }) { return <span className={`status status-${status.toLowerCase().replaceAll(' ', '-')}`}><i />{status}</span>; }
 
-function FrontDesk({ rooms, refresh, notify, isAdmin, canManageRooms }) {
+function FrontDesk({ rooms, refresh, notify, canManageRooms }) {
   const [guest, setGuest] = useState(null);
   const [error, setError] = useState('');
   async function checkIn(event) {
@@ -277,11 +327,6 @@ function FrontDesk({ rooms, refresh, notify, isAdmin, canManageRooms }) {
     try { await api('/staff/rooms/' + encodeURIComponent(room.roomNumber) + '/status', { method: 'PATCH', body: JSON.stringify({ status: next }) }); await refresh(); notify('Room ' + room.roomNumber + ' · ' + next.toLowerCase()); }
     catch (err) { setError(err.message); }
   }
-  async function addRoom(event) {
-    event.preventDefault(); const target = event.currentTarget; const form = new FormData(target);
-    try { await api('/admin/rooms', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) }); target.reset(); await refresh(); notify('Room added to this hotel'); }
-    catch (err) { setError(err.message); }
-  }
   return <><div className="page-head"><div><p className="eyebrow">RECEPTION</p><h1>Front desk</h1><p className="subhead">Verify reservations, record phone requests, and give each checked-in guest a private QR path.</p></div></div>
     {error && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
     <div className="desk-grid">
@@ -290,8 +335,28 @@ function FrontDesk({ rooms, refresh, notify, isAdmin, canManageRooms }) {
       <section className="form-panel"><h2>Phone-to-ticket</h2><p>Record a call against an occupied room. It uses the same routing and status tracking as a QR request.</p><form onSubmit={phoneRequest}><label className="field"><span>Occupied room</span><select name="roomNumber" required defaultValue=""><option value="" disabled>Choose a room</option>{rooms.filter(room => room.status === 'Occupied').map(room => <option key={room._id} value={room.roomNumber}>{room.roomNumber}</option>)}</select></label><label className="field"><span>Department</span><select name="category">{departments.map(item => <option key={item}>{item}</option>)}</select></label><label className="field"><span>What did the guest report?</span><textarea name="description" rows="3" minLength="8" maxLength="600" required /></label><label className="priority-choice"><input type="checkbox" name="priority" value="Urgent" /><span><strong>Urgent</strong><small>Safety or essential room access issue.</small></span></label><button className="primary" type="submit">Create tracked request <span>→</span></button></form></section>
     </div>
     <section className="table-panel room-readiness"><h2>Room readiness</h2><div className="room-status-list">{rooms.map(room => <div className="room-status-row" key={room._id}><strong>Room {room.roomNumber}</strong><span>{room.status}</span>{canManageRooms && (room.status === 'Needs Cleaning' || room.status === 'Cleaning in Progress') && <button className="small-button" onClick={() => updateRoom(room)}>{room.status === 'Needs Cleaning' ? 'Start cleaning' : 'Mark ready'}</button>}</div>)}</div></section>
-    {isAdmin && <section className="form-panel add-room-panel"><h2>Add a room</h2><p>Rooms are available to front desk staff in this hotel only.</p><form onSubmit={addRoom}><Field label="Room number" name="roomNumber" placeholder="e.g. 202" required maxLength={12} pattern="[A-Za-z0-9-]+" /><button className="secondary" type="submit">Add room</button></form></section>}
     {guest && <section className="qr-result"><div><p className="eyebrow">GUEST QR SESSION</p><h2>{guest.guest.name} · Room {guest.stay.roomNumber}</h2><p>Scan this private code to open the guest portal. Room details are only returned after the server verifies this active stay.</p><a href={guest.guestAccessUrl} target="_blank" rel="noreferrer">Open guest portal on this device ↗</a></div><div className="qr-card"><QRCodeSVG value={guest.guestAccessUrl} size={156} level="H" includeMargin /></div></section>}
+  </>;
+}
+
+
+function RoomManagement({ rooms, refresh, notify }) {
+  const [error, setError] = useState('');
+  async function addRoom(event) {
+    event.preventDefault(); const target = event.currentTarget; const form = new FormData(target); setError('');
+    try { await api('/admin/rooms', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) }); target.reset(); await refresh(); notify('Room added · available dates will appear to guests'); }
+    catch (err) { setError(err.message); }
+  }
+  async function setRoomStatus(room, status) {
+    try { await api('/admin/rooms/' + room._id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) }); await refresh(); notify('Room ' + room.roomNumber + ' is now ' + status.toLowerCase()); }
+    catch (err) { setError(err.message); }
+  }
+  const guestBookable = rooms.filter(room => ['Available', 'Ready for Check-in'].includes(room.status)).length;
+  return <><div className="page-head"><div><p className="eyebrow">ROOM INVENTORY</p><h1>Rooms</h1><p className="subhead">Add rooms here. Available and ready rooms appear in the guest booking list when dates are open.</p></div><div className="room-summary"><strong>{guestBookable}</strong><span>bookable rooms</span></div></div>
+    {error && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
+    <div className="rooms-layout"><section className="table-panel"><h2>Hotel rooms</h2><div className="room-management-list">{rooms.length ? rooms.map(room => <div className="room-management-row" key={room._id}><span className="room-type-mark"><BedDouble size={16} /></span><span className="room-identity"><strong>Room {room.roomNumber}</strong><small>{room.roomType || 'Standard'}</small></span><span className="guest-visibility"><CheckCircle2 size={14} />{['Available', 'Ready for Check-in'].includes(room.status) ? 'Shown for available dates' : 'Hidden from guest search'}</span><select aria-label={'Set room ' + room.roomNumber + ' status'} value={room.status} disabled={room.status === 'Occupied'} onChange={event => setRoomStatus(room, event.target.value)}>{(room.status === 'Occupied' ? ['Occupied'] : ['Available', 'Needs Cleaning', 'Cleaning in Progress', 'Ready for Check-in']).map(status => <option key={status}>{status}</option>)}</select></div>) : <div className="empty-state"><strong>No rooms yet</strong><p>Add the first room to make it bookable for guests.</p></div>}</div></section>
+      <section className="form-panel add-room-panel"><h2>Add a room</h2><p>Rooms start as available and show to guests for dates with no reservation overlap.</p><form onSubmit={addRoom}><Field label="Room number" name="roomNumber" placeholder="e.g. 202" required maxLength={12} pattern="[A-Za-z0-9-]+" /><Field label="Room type" name="roomType" placeholder="Standard, Deluxe, Family" required maxLength={60} /><button className="primary" type="submit">Add room <ArrowRight size={15} /></button></form><div className="room-legend"><span><i className="legend-open" />Guest-bookable</span><span><i className="legend-closed" />Hidden until ready</span></div></section>
+    </div>
   </>;
 }
 
@@ -302,31 +367,49 @@ function Team({ staff, refresh, notify }) {
     try { await api('/admin/staff', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) }); target.reset(); await refresh(); notify('Staff account added'); }
     catch (err) { setError(err.message); }
   }
-  return <><div className="page-head"><div><p className="eyebrow">PEOPLE & ROUTING</p><h1>Team</h1><p className="subhead">Requests route by department, then to the staff member with the lightest open queue.</p></div></div><div className="team-layout"><section className="table-panel"><h2>Hotel staff</h2><div className="staff-list">{staff.map(person => <div className="staff-row" key={person._id}><span className="avatar">{person.name.slice(0,1)}</span><span><strong>{person.name}</strong><small>{person.email}</small></span><span className="department-tag">{person.department}</span><Status status={person.active ? 'Active' : 'Inactive'} /></div>)}{!staff.length && <p className="muted">No staff accounts yet. Add your first staff member.</p>}</div></section><section className="form-panel add-staff"><h2>Add staff account</h2><p>Give each team member one department for clear request routing.</p>{error && <div className="inline-error">{error}</div>}<form onSubmit={add}><Field label="Full name" name="name" required maxLength={80} /><Field label="Email" name="email" type="email" required maxLength={254} /><label className="field"><span>Department</span><select name="department">{departments.map(item => <option key={item}>{item}</option>)}</select></label><Field label="Temporary password" name="password" type="password" minLength={12} required maxLength={128} /><button className="primary" type="submit">Add to team <span>→</span></button></form></section></div></>;
+  return <><div className="page-head"><div><p className="eyebrow">PEOPLE & ROUTING</p><h1>Team</h1><p className="subhead">Requests route by department, then to the staff member with the lightest open queue.</p></div></div><div className="team-layout"><section className="table-panel"><h2>Hotel staff</h2><div className="staff-list">{staff.map(person => <div className="staff-row" key={person._id}><span className="avatar">{person.name.slice(0,1)}</span><span><strong>{person.name}</strong><small>{person.email}</small></span><span className="department-tag">{person.department}</span><Status status={person.active ? 'Active' : 'Inactive'} /></div>)}{!staff.length && <p className="muted">No staff accounts yet. Add your first staff member.</p>}</div></section><section className="form-panel add-staff"><h2>Add staff account</h2><p>Give each team member one department for clear request routing.</p>{error && <div className="inline-error">{error}</div>}<form onSubmit={add}><Field label="Full name" name="name" required maxLength={80} /><Field label="Email" name="email" type="email" required maxLength={254} /><Field label="Phone for SMS recovery (optional)" name="phone" type="tel" placeholder="+639171234567" pattern="\+[1-9]\d{7,14}" maxLength={16} hint="Use international format." /><label className="field"><span>Department</span><select name="department">{departments.map(item => <option key={item}>{item}</option>)}</select></label><Field label="Temporary password" name="password" type="password" minLength={12} required maxLength={128} /><button className="primary" type="submit">Add to team <span>→</span></button></form></section></div></>;
 }
 
 function Activity({ logs }) {
   return <><div className="page-head"><div><p className="eyebrow">AUDIT TRAIL</p><h1>Activity log</h1><p className="subhead">A hotel-scoped record of check-ins, request handoffs, decisions, and escalation.</p></div><span className="log-count">Latest {logs.length} events</span></div><section className="activity-panel"><div className="activity-head"><span>Activity</span><span>Who</span><span>When</span></div>{logs.length ? logs.map(log => <div className="activity-row" key={log._id}><div><strong>{log.summary}</strong><small>{log.action.replaceAll('.', ' · ')}{log.reason ? ` · ${log.reason}` : ''}</small></div><span className="actor"><span className="avatar tiny">{log.actorName.slice(0,1)}</span>{log.actorName}<em>{log.actorRole}</em></span><time>{dateTime(log.createdAt)}</time></div>) : <div className="empty-state"><strong>No activity yet</strong><p>System actions will be recorded here.</p></div>}</section></>;
 }
 
-function GuestPortal({ session, requests, refresh, notify, error, logout, toast }) {
+function GuestPortal({ session, requests, lostFound, refresh, notify, error, logout, toast }) {
   const [formError, setFormError] = useState('');
+  const [ratings, setRatings] = useState({});
+  const [feedback, setFeedback] = useState({});
+  const [reportError, setReportError] = useState('');
   async function submit(event) {
     event.preventDefault(); const target = event.currentTarget; setFormError(''); const form = new FormData(target);
     try { await api('/guest/requests', { method: 'POST', body: JSON.stringify(Object.fromEntries(form.entries())) }); target.reset(); await refresh(); notify('Request sent to the hotel team'); }
     catch (err) { setFormError(err.message); }
   }
   async function close(id) {
-    try { await api(`/guest/requests/${id}/close`, { method: 'PATCH', body: '{}' }); await refresh(); notify('Request closed · thank you'); }
+    try { await api(`/guest/requests/${id}/close`, { method: 'PATCH', body: JSON.stringify({ rating: ratings[id] || 5, feedback: feedback[id] || '' }) }); await refresh(); notify('Request closed · thank you for your feedback'); }
     catch (err) { setFormError(err.message); }
   }
-  return <main className="guest-shell"><header className="guest-header"><div className="brand"><span className="brand-mark">S</span><span>StayFlow</span></div><div className="guest-hotel"><span className="hotel-dot" />{session.hotel?.name} <span>·</span> Room {session.stay?.roomNumber}</div><button className="text-button" onClick={logout}>End session</button></header><div className="guest-content">
+  async function reportItem(event) {
+    event.preventDefault(); const target = event.currentTarget; setReportError('');
+    try { await api('/guest/lost-found', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(target).entries())) }); target.reset(); await refresh(); notify('Lost and found report sent to the hotel team'); }
+    catch (err) { setReportError(err.message); }
+  }
+  return <main className="guest-shell"><header className="guest-header"><div className="brand"><span className="brand-mark"><HotelIcon size={17} strokeWidth={1.8} /></span><span>StayFlow</span></div><div className="guest-hotel"><span className="hotel-dot" />{session.hotel?.name} <span>·</span> Room {session.stay?.roomNumber}</div><button className="text-button" onClick={logout}>End session</button></header><div className="guest-content">
     <section className="guest-welcome"><div><p className="eyebrow">YOUR STAY, TAKEN CARE OF</p><h1>How can we help?</h1><p>Send a request directly to the right team. You’ll see who has it and when it’s been handled.</p></div><div className="stay-ticket"><span>ACTIVE STAY</span><strong>Room {session.stay?.roomNumber}</strong><small>Verified room access</small></div></section>
     {(error || formError) && <div className="notice error-notice" role="alert">{formError || error}<button onClick={() => setFormError('')}>Dismiss</button></div>}
     <div className="guest-grid"><section className="guest-form-panel"><h2>Request service</h2><p>Tell us what’s happening. Avoid including payment details or sensitive personal information.</p><form onSubmit={submit}><label className="field"><span>What do you need?</span><select name="category" required>{departments.map(item => <option key={item}>{item}</option>)}</select></label><label className="field"><span>Describe the issue</span><textarea name="description" rows="4" minLength="8" maxLength="600" placeholder="For example: the air conditioning is not cooling the room…" required /></label><label className="priority-choice"><input type="checkbox" name="priority" value="Urgent" /><span><strong>Urgent</strong><small>Use if the issue affects safety or essential room access.</small></span></label><button className="primary" type="submit">Send request <span>→</span></button></form></section>
-    <section className="guest-tracking"><div className="tracking-head"><div><h2>Your requests</h2><p>Updates appear here as the hotel team responds.</p></div><span className="live-label"><i /> Live</span></div>{requests.length ? <div className="guest-request-list">{requests.map(item => <article className="guest-request" key={item.id}><div className="guest-request-top"><span className="guest-category">{item.category} · Room {item.roomNumber}</span><Status status={item.status} /></div><p>{item.description}</p><div className="guest-request-meta"><span>{item.ownerName ? `With ${item.ownerName}` : 'Waiting for a team member'}</span><time>{dateTime(item.createdAt)}</time></div>{item.status === 'Completed' && <button className="small-button strong" onClick={() => close(item.id)}>Confirm and close</button>}{item.status === 'Closed' && <small className="closed-thanks">Closed · Thank you for letting us know.</small>}</article>)}</div> : <div className="guest-empty"><span className="empty-mark">✓</span><strong>No open requests</strong><p>When you need help, the form on this page sends a tracked request to the right team.</p></div>}</section></div>
+    <section className="guest-tracking"><div className="tracking-head"><div><h2>Your requests</h2><p>Updates appear here as the hotel team responds.</p></div><span className="live-label"><i /> Live</span></div>{requests.length ? <div className="guest-request-list">{requests.map(item => <article className="guest-request" key={item.id}><div className="guest-request-top"><span className="guest-category">{item.category} · Room {item.roomNumber}</span><Status status={item.status} /></div><p>{item.description}</p><div className="guest-request-meta"><span>{item.ownerName ? `With ${item.ownerName}` : 'Waiting for a team member'}</span><time>{dateTime(item.createdAt)}</time></div>{item.status === 'Completed' && <div className="guest-feedback"><span>How was the service?</span><div className="rating-stars" role="group" aria-label="Rate the service from 1 to 5">{[1,2,3,4,5].map(value => <button type="button" key={value} aria-label={`${value} star${value > 1 ? 's' : ''}`} aria-pressed={(ratings[item.id] || 5) === value} onClick={() => setRatings(old => ({ ...old, [item.id]: value }))}><Star size={17} fill={(ratings[item.id] || 5) >= value ? 'currentColor' : 'none'} /></button>)}</div><input aria-label="Optional service feedback" maxLength={240} placeholder="Optional note for the team" value={feedback[item.id] || ''} onChange={event => setFeedback(old => ({ ...old, [item.id]: event.target.value }))} /><button className="small-button strong" onClick={() => close(item.id)}>Rate and close</button></div>}{item.status === 'Closed' && <small className="closed-thanks">Closed · Rated {item.guestRating || '—'} out of 5. Thank you for letting us know.</small>}</article>)}</div> : <div className="guest-empty"><span className="empty-mark">✓</span><strong>No open requests</strong><p>When you need help, the form on this page sends a tracked request to the right team.</p></div>}</section></div>
+    <section className="lost-guest-panel"><div><p className="eyebrow">LOST & FOUND</p><h2>Missing something?</h2><p>Send a short note to the hotel team. Do not include valuables or sensitive details.</p></div>{reportError && <div className="inline-error" role="alert">{reportError}</div>}<form onSubmit={reportItem}><label className="field"><span>Report type</span><select name="reportType"><option>Lost</option><option>Found</option></select></label><label className="field"><span>Describe the item and where it may be</span><textarea name="description" rows="3" minLength="8" maxLength="500" required /></label><button className="primary" type="submit">Send report <ArrowRight size={15} /></button></form>{lostFound.length > 0 && <div className="guest-lost-list">{lostFound.map(item => <article key={item.id}><span>{item.reportType} · Room {item.roomNumber}</span><Status status={item.status} /><p>{item.description}</p></article>)}</div>}</section>
     <footer className="guest-footer">StayFlow keeps your requests visible to this hotel team during your active stay.</footer>
   </div>{toast && <div className="toast" role="status">{toast}</div>}</main>;
+}
+
+function LostFoundDesk({ reports, refresh, notify }) {
+  const [error, setError] = useState('');
+  async function update(report, status) {
+    try { await api('/staff/lost-found/' + report.id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) }); await refresh(); notify('Lost and found report updated'); }
+    catch (err) { setError(err.message); }
+  }
+  return <><div className="page-head"><div><p className="eyebrow">GUEST PROPERTY</p><h1>Lost & Found</h1><p className="subhead">Track guest reports from first notice through return or closure.</p></div><span className="log-count">{reports.filter(row => !['Returned', 'Closed'].includes(row.status)).length} open reports</span></div>{error && <div className="notice error-notice" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}<section className="lost-desk-list">{reports.length ? reports.map(report => <article className="lost-report" key={report.id}><div className="lost-report-head"><PackageSearch size={18} /><strong>{report.reportType} item · Room {report.roomNumber}</strong><Status status={report.status} /></div><p>{report.description}</p><div className="guest-request-meta"><span>Reported by {report.reporterName}</span><time>{dateTime(report.createdAt)}</time></div>{!['Returned', 'Closed'].includes(report.status) && <label className="lost-status">Update status<select value={report.status} onChange={event => update(report, event.target.value)}><option value={report.status} disabled>{report.status}</option>{(report.status === 'Open' ? ['Located', 'Returned', 'Closed'] : ['Returned', 'Closed']).map(status => <option key={status}>{status}</option>)}</select></label>}</article>) : <div className="empty-state"><strong>No lost and found reports</strong><p>Guest reports will appear here during active stays.</p></div>}</section></>;
 }
 
 createRoot(document.getElementById('root')).render(<React.StrictMode><App /></React.StrictMode>);

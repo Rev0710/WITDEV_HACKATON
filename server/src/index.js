@@ -48,11 +48,15 @@ app.use((req, res, next) => {
   next();
 });
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }));
+app.get("/health", (req, res) => res.json({ ok: true }));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'stayflow-api' }));
 app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, limit: 12, standardHeaders: 'draft-7', legacyHeaders: false }));
 app.use('/api/auth/signup', rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false }));
+app.use('/api/auth/forgot-password', rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false }));
+app.use('/api/auth/reset-password', rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false }));
 app.use('/api/public/reservations', rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false }));
 app.use('/api', routes);
+app.use('/api', (_req, res) => res.status(404).json({ error: 'This StayFlow API route was not found.' }));
 app.use((err, _req, res, _next) => {
   if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request is too large.' });
   if (process.env.NODE_ENV !== 'production') console.error('StayFlow request error:', err.name, err.message);
@@ -68,13 +72,14 @@ io.use(async (socket, next) => {
     const token = cookies.stayflow_session;
     if (!token) return next(new Error('Authentication required.'));
     const payload = jwt.verify(token, process.env.JWT_SECRET, { issuer: 'stayflow' });
-    const user = await User.findOne({ _id: payload.sub, hotelId: payload.hotelId, active: true }).select('_id hotelId role');
-    if (!user || user.role !== payload.role) return next(new Error('Authentication required.'));
+    const user = await User.findOne({ _id: payload.sub, hotelId: payload.hotelId, active: true }).select('_id hotelId role sessionVersion');
+    if (!user || user.role !== payload.role || (payload.sv ?? 0) !== (user.sessionVersion || 0)) return next(new Error('Authentication required.'));
     socket.user = user;
     next();
   } catch { next(new Error('Authentication required.')); }
 });
 io.on('connection', socket => {
+  socket.join('user:' + socket.user._id);
   if (socket.user.role === 'guest') socket.join(`guest:${socket.user._id}`);
   else socket.join(`hotel:${socket.user.hotelId}:staff`);
 });

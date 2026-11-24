@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 const { User, Stay } = require('./models');
 
 function signSession(user) {
-  return jwt.sign({ sub: String(user._id), hotelId: String(user.hotelId), role: user.role }, process.env.JWT_SECRET, { expiresIn: '8h', issuer: 'stayflow' });
+  return jwt.sign({ sub: String(user._id), hotelId: String(user.hotelId), role: user.role, sv: user.sessionVersion || 0 }, process.env.JWT_SECRET, { expiresIn: '8h', issuer: 'stayflow' });
 }
 
 async function requireSession(req, res, next) {
@@ -10,8 +10,8 @@ async function requireSession(req, res, next) {
     const token = req.cookies.stayflow_session;
     if (!token) return res.status(401).json({ error: 'Sign in to continue.' });
     const payload = jwt.verify(token, process.env.JWT_SECRET, { issuer: 'stayflow' });
-    const user = await User.findOne({ _id: payload.sub, hotelId: payload.hotelId, active: true }).select('_id hotelId name email role department');
-    if (!user || user.role !== payload.role) return res.status(401).json({ error: 'Your session is no longer active.' });
+    const user = await User.findOne({ _id: payload.sub, hotelId: payload.hotelId, active: true }).select('_id hotelId name email role department sessionVersion');
+    if (!user || user.role !== payload.role || (payload.sv ?? 0) !== (user.sessionVersion || 0)) return res.status(401).json({ error: 'Your session is no longer active.' });
     req.user = user;
     if (user.role === 'guest') {
       const stay = await Stay.findOne({ hotelId: user.hotelId, guestId: user._id, status: 'Active' }).select('_id roomId');
